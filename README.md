@@ -263,8 +263,8 @@ CONFIG_PATH=/path/to/config.toml mediaflow-proxy-light
 | `POST` | `/base64/encode` | Base64-encode a URL |
 | `POST` | `/base64/decode` | Decode a base64 URL |
 | `GET` | `/base64/check` | Check if a string is base64-encoded |
-| `GET` | `/health` | Health check |
-| `GET` | `/metrics` | Prometheus-style request metrics |
+| `GET` | `/health` | Health check (unauthenticated) |
+| `GET` | `/metrics` | Request metrics — **requires `?api_password=…`** (same credential as other endpoints) |
 | `GET` | `/playlist/builder` | M3U playlist builder |
 | `GET` | `/speedtest` | Speed test UI |
 

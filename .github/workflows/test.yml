@@ -93,7 +93,7 @@ jobs:
             --release \
             --target aarch64-linux-android \
             --no-default-features \
-            --features "hls,mpd,drm,xtream,extractors,base64-url,vendored-openssl"
+            --features "hls,mpd,drm,xtream,extractors,base64-url,vendored-openssl,web-ui,acestream"
 
   # ---------------------------------------------------------------------------
   # iOS cross-compile smoke test (device arch only)
@@ -114,9 +114,10 @@ jobs:
         # IPHONEOS_DEPLOYMENT_TARGET=13.0: some deps (boring-sys, zstd-sys)
         # require modern system intrinsics (e.g. ___chkstk_darwin).
         #
-        # `extractors` is intentionally omitted — the rquest/boring HTTP client
-        # used by 4 Cloudflare-bypassing extractors cannot link against
-        # iOS system libraries cleanly, and iOS apps have no use for them.
+        # `extractors` is intentionally omitted — the rquest/boring HTTP
+        # client used by the 4 Cloudflare-bypass extractors cannot link
+        # against iOS system libraries cleanly, and iOS apps have no use
+        # for them (streaming providers with anti-bot don't target iOS).
         env:
           IPHONEOS_DEPLOYMENT_TARGET: "13.0"
         run: |
@@ -124,4 +125,4 @@ jobs:
             --release \
             --target aarch64-apple-ios \
             --no-default-features \
-            --features "ffi,hls,mpd,drm,xtream"
+            --features "ffi,hls,mpd,drm,xtream,web-ui"

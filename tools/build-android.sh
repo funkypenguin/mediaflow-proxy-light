@@ -53,9 +53,11 @@ esac
 [[ -d "$NDK_BIN" ]] || { echo "NDK toolchain not found at $NDK_BIN" >&2; exit 1; }
 export PATH="$NDK_BIN:$PATH"
 
-# Feature set — mirrors the Android release CI.  Keep in sync with
-# .github/workflows/release.yml → build-android job.
-FEATURES="hls,mpd,drm,xtream,extractors,base64-url,vendored-openssl,acestream"
+# Feature set — mirrors the Android release CI.  Keep in sync with the
+# `mediaflow-android` release workflow.
+# `web-ui` is included so the on-device web UI (served from the proxy on
+# localhost) works when the user opens the configurator from a browser.
+FEATURES="hls,mpd,drm,xtream,extractors,base64-url,vendored-openssl,acestream,web-ui"
 
 # All ABIs supported by default
 ALL_TARGETS=(

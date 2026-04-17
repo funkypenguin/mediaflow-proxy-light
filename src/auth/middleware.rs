@@ -15,7 +15,6 @@ use crate::error::AppError;
 const OPEN_ENDPOINTS: &[&str] = &[
     "/proxy/generate_url",
     "/health",
-    "/metrics",
     // Web UI navigation paths (redirect to .html pages)
     "/speedtest",
     "/url-generator",

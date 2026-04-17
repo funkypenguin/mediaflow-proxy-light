@@ -14,7 +14,7 @@ All settings can be configured via environment variables using the `APP__<SECTIO
 
 | Variable | Default | Description |
 |---|---|---|
-| `APP__AUTH__API_PASSWORD` | *(none)* | API password. If set, all endpoints require `?api_password=<value>` |
+| `APP__AUTH__API_PASSWORD` | *(none)* | API password. If set, all endpoints require `?api_password=<value>` (or an encrypted `?token=...`). Applies to `/proxy/*`, `/extractor/*`, `/metrics`, `/generate_url`, `/base64/*`, and the Xtream Codes endpoints. Only `/health` and the static web-UI pages are unauthenticated. |
 
 ## Proxy / Routing
 
