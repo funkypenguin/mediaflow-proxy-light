@@ -46,7 +46,11 @@ impl Extractor for VixCloudExtractor {
         _extra: &ExtraParams,
     ) -> Result<ExtractorResult, ExtractorError> {
         let html = if url.contains("/movie") || url.contains("/tv") {
-            let marker = if url.contains("/movie") { "/movie" } else { "/tv" };
+            let marker = if url.contains("/movie") {
+                "/movie"
+            } else {
+                "/tv"
+            };
             let (site_url, rest) = url
                 .split_once(marker)
                 .map(|(s, r)| (s.to_string(), format!("{marker}{r}")))
