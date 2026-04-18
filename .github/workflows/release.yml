@@ -28,7 +28,11 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: mediaflow-proxy-light
             asset_name: mediaflow-proxy-light-linux-x86_64
-          - os: ubuntu-latest
+          # Native ARM runner — avoids cross-compile entirely.  Cross-compiling
+          # boring-sys2 via gcc-aarch64-linux-gnu is unreliable (cc-rs / CMake /
+          # bindgen can silently fall back to host gcc, producing x86_64 .o files
+          # in the rlib → `Relocations in generic ELF (EM: 62)` at final link).
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact_name: mediaflow-proxy-light
             asset_name: mediaflow-proxy-light-linux-aarch64
@@ -54,28 +58,10 @@ jobs:
           toolchain: ${{ env.RUST_VERSION }}
           targets: ${{ matrix.target }}
 
-      - name: Install cross-compilation tools
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-
-      - name: Set cross-compilation environment
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
-        run: |
-          # Rust linker
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
-          # C/C++ cross-compilers for cc-rs driven build.rs scripts (boring-sys2,
-          # zstd-sys, ring).  Without these they compile for the host (x86_64)
-          # and the final link fails with `Relocations in generic ELF (EM: 62)`.
-          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc"  >> $GITHUB_ENV
-          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
-          echo "AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar"   >> $GITHUB_ENV
-
       - name: Build
-        # The default features include `tls-rustls` (pure-Rust TLS), so no
-        # system OpenSSL is needed on any target — including ARM64 Linux
-        # cross-compiles and Windows builds.
+        # Default features include `tls-rustls` (pure-Rust TLS), so no system
+        # OpenSSL is needed on any target.  Each matrix entry runs on a native
+        # host for its target, so no cross-compile env vars are needed.
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Upload binary to release

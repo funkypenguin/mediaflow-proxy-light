@@ -104,19 +104,24 @@ for entry in "${TARGETS[@]}"; do
     echo "==> $ABI ($RUST_TARGET)"
 
     TARGET_UPPER="$(echo "$RUST_TARGET" | tr 'a-z-' 'A-Z_')"
+    # CC_/AR_/RANLIB_<target> use the raw target triple which contains hyphens,
+    # and bash `export` rejects identifiers with hyphens.  Use `env` inline to
+    # pass them through to cargo — `env` accepts any byte sequence in names.
+    # (CARGO_TARGET_*_LINKER is fine to export because TARGET_UPPER is underscore-only.)
     export "CARGO_TARGET_${TARGET_UPPER}_LINKER=$NDK_BIN/$LINKER"
-    export "CC_${RUST_TARGET}=$NDK_BIN/$LINKER"
-    export "AR_${RUST_TARGET}=$NDK_BIN/llvm-ar"
+
     # NDK r23+ dropped legacy `<target>-ranlib` shims; vendored-openssl's
     # Makefile hard-codes that name.  Point it at `llvm-ranlib` instead.
-    export "RANLIB_${RUST_TARGET}=$NDK_BIN/llvm-ranlib"
-
-    cargo build \
-        --release \
-        --target "$RUST_TARGET" \
-        --no-default-features \
-        --features "$FEATURES" \
-        --manifest-path "$PROJECT_DIR/Cargo.toml"
+    env \
+        "CC_${RUST_TARGET}=$NDK_BIN/$LINKER" \
+        "AR_${RUST_TARGET}=$NDK_BIN/llvm-ar" \
+        "RANLIB_${RUST_TARGET}=$NDK_BIN/llvm-ranlib" \
+        cargo build \
+            --release \
+            --target "$RUST_TARGET" \
+            --no-default-features \
+            --features "$FEATURES" \
+            --manifest-path "$PROJECT_DIR/Cargo.toml"
 
     OUT="$PROJECT_DIR/target/$RUST_TARGET/release/mediaflow-proxy-light"
     STRIPPED="$PROJECT_DIR/target/$RUST_TARGET/release/libmediaflow-proxy.so"
