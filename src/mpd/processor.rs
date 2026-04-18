@@ -826,8 +826,8 @@ pub fn compute_live_media_sequence(
         .or_else(|| resolve_nominal_duration(segments));
 
     if let (Some(t), Some(nom)) = (first_segment.time, nominal) {
-        if nom > 0 {
-            return (t / nom).max(1);
+        if let Some(n) = t.checked_div(nom) {
+            return n.max(1);
         }
     }
 
@@ -912,7 +912,7 @@ pub fn build_hls_master(
     }
 
     // Sort highest bandwidth first so dedup keeps best codec per quality tier.
-    video_profiles.sort_by(|a, b| b.bandwidth.cmp(&a.bandwidth));
+    video_profiles.sort_by_key(|p| std::cmp::Reverse(p.bandwidth));
     let mut seen_rep_ids = std::collections::HashSet::new();
     video_profiles.retain(|p| seen_rep_ids.insert(p.rep_id.clone()));
 
@@ -1325,7 +1325,7 @@ fn filter_by_resolution<'a>(profiles: Vec<&'a MpdProfile>, target: &str) -> Vec<
         return profiles;
     }
     // Find the profile at or below target height
-    valid.sort_by(|a, b| b.height.cmp(&a.height));
+    valid.sort_by_key(|p| std::cmp::Reverse(p.height));
 
     let selected = valid
         .iter()

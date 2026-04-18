@@ -319,12 +319,10 @@ impl Mp4Decrypter {
         let mut codec_format: Option<[u8; 4]> = None;
         for child in Mp4Parser::children_of(&sinf.data) {
             match &child.atom_type {
-                b"frma" => {
-                    if child.data.len() >= 4 {
-                        let mut t = [0u8; 4];
-                        t.copy_from_slice(&child.data[..4]);
-                        codec_format = Some(t);
-                    }
+                b"frma" if child.data.len() >= 4 => {
+                    let mut t = [0u8; 4];
+                    t.copy_from_slice(&child.data[..4]);
+                    codec_format = Some(t);
                 }
                 b"schm" => self.parse_schm(&child),
                 b"schi" => {
