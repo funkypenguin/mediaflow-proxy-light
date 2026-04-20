@@ -247,20 +247,39 @@ pub async fn generate_url(req: web::Json<GenerateUrlRequest>) -> AppResult<HttpR
     })))
 }
 
+// Mirrors Python's IP_LOOKUP_SERVICES — tried in order; first success wins.
+const IP_LOOKUP_SERVICES: &[(&str, &str)] = &[
+    ("https://api.ipify.org?format=json", "ip"),
+    ("https://ipinfo.io/json", "ip"),
+    ("https://httpbin.org/ip", "origin"),
+];
+
 pub async fn get_public_ip(stream_manager: web::Data<StreamManager>) -> AppResult<HttpResponse> {
-    let response = stream_manager
-        .make_request(
-            "https://api.ipify.org?format=json".to_string(),
-            HeaderMap::new(),
-        )
-        .await?;
+    for (url, key) in IP_LOOKUP_SERVICES {
+        match stream_manager
+            .make_request((*url).to_string(), HeaderMap::new())
+            .await
+        {
+            Ok(resp) => match resp.json::<serde_json::Value>().await {
+                Ok(data) => {
+                    if let Some(ip) = data.get(*key).and_then(|v| v.as_str()) {
+                        let ip = ip.trim();
+                        if !ip.is_empty() {
+                            return Ok(HttpResponse::Ok()
+                                .json(serde_json::json!({ "ip": ip })));
+                        }
+                    }
+                    tracing::warn!("IP lookup {} returned no '{}' field", url, key);
+                }
+                Err(e) => tracing::warn!("IP lookup {} body parse failed: {}", url, e),
+            },
+            Err(e) => tracing::warn!("IP lookup {} request failed: {}", url, e),
+        }
+    }
 
-    let ip_data = response
-        .json::<serde_json::Value>()
-        .await
-        .map_err(|e| AppError::Internal(format!("Failed to parse IP response: {}", e)))?;
-
-    Ok(HttpResponse::Ok().json(ip_data))
+    Err(AppError::Upstream(
+        "Failed to retrieve public IP from all services".to_string(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
