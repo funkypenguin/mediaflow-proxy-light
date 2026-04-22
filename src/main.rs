@@ -331,6 +331,35 @@ async fn main() -> std::io::Result<()> {
             );
         }
 
+        // Generic /proxy scope — MUST be registered BEFORE the Xtream block
+        // below.  actix-web evaluates services in registration order, and
+        // Xtream's root-level catch-all /{username}/{password}/{stream_id}[.{ext}]
+        // matches any 3-segment path (e.g. /proxy/stream/foo.mkv →
+        // username=proxy, password=stream, stream_id=foo, ext=mkv), shadowing
+        // /proxy/stream/{filename:.*} and returning an "Invalid XC username
+        // format" error from short_stream_handler.
+        {
+            use epg::handler::epg_proxy_handler;
+            app = app.service(
+                web::scope("/proxy")
+                    .route("/stream", web::get().to(handler::proxy_stream_get))
+                    .route("/stream", web::head().to(handler::proxy_stream_head))
+                    .route(
+                        "/stream/{filename:.*}",
+                        web::get().to(handler::proxy_stream_get),
+                    )
+                    .route(
+                        "/stream/{filename:.*}",
+                        web::head().to(handler::proxy_stream_head),
+                    )
+                    .route("/generate_url", web::post().to(handler::generate_url))
+                    .route("/ip", web::get().to(handler::get_public_ip))
+                    // EPG proxy — XMLTV pass-through with caching (Channels DVR & all providers)
+                    .route("/epg", web::get().to(epg_proxy_handler))
+                    .route("/epg", web::head().to(epg_proxy_handler)),
+            );
+        }
+
         // ── Xtream Codes routes (Phase 4) ───────────────────────────────────────
         // MUST come after all /proxy/* sub-scopes: the short-stream catch-all
         // /{username}/{password}/{stream_id} matches any 3-segment path at root.
@@ -481,31 +510,6 @@ async fn main() -> std::io::Result<()> {
         {
             use web_ui::handler::index_handler;
             app = app.route("/", web::get().to(index_handler));
-        }
-
-        // Generic /proxy scope MUST come LAST — it prefix-matches all /proxy/*
-        // paths, so it must only run after all specific /proxy/hls, /proxy/mpd,
-        // /proxy/telegram etc. scopes have already been given a chance to match.
-        {
-            use epg::handler::epg_proxy_handler;
-            app = app.service(
-                web::scope("/proxy")
-                    .route("/stream", web::get().to(handler::proxy_stream_get))
-                    .route("/stream", web::head().to(handler::proxy_stream_head))
-                    .route(
-                        "/stream/{filename:.*}",
-                        web::get().to(handler::proxy_stream_get),
-                    )
-                    .route(
-                        "/stream/{filename:.*}",
-                        web::head().to(handler::proxy_stream_head),
-                    )
-                    .route("/generate_url", web::post().to(handler::generate_url))
-                    .route("/ip", web::get().to(handler::get_public_ip))
-                    // EPG proxy — XMLTV pass-through with caching (Channels DVR & all providers)
-                    .route("/epg", web::get().to(epg_proxy_handler))
-                    .route("/epg", web::head().to(epg_proxy_handler)),
-            );
         }
 
         app
