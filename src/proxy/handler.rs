@@ -6,9 +6,11 @@ use actix_web::{
 use futures::{stream, StreamExt};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::boxed::Box;
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
 
@@ -180,71 +182,162 @@ pub async fn proxy_stream_head(
     handle_proxy_request(req, stream_manager, proxy_data, metrics, true).await
 }
 
-pub async fn generate_url(req: web::Json<GenerateUrlRequest>) -> AppResult<HttpResponse> {
-    let mut url = req.mediaflow_proxy_url.clone();
+/// Shared URL-building logic used by generate_url and generate_encrypted_or_encoded_url.
+///
+/// Encrypted tokens use Python's path format: `{base}/_token_{token}{endpoint_path}`.
+/// Unencrypted tokens use flat query params matching Python's encode_mediaflow_proxy_url.
+pub fn build_proxy_url(
+    mediaflow_proxy_url: &str,
+    endpoint: Option<&str>,
+    destination_url: &str,
+    query_params: &HashMap<String, String>,
+    request_headers: &HashMap<String, String>,
+    response_headers: &HashMap<String, String>,
+    propagate_response_headers: &HashMap<String, String>,
+    remove_response_headers: &[String],
+    stream_transformer: Option<&str>,
+    filename: Option<&str>,
+    api_password: Option<&str>,
+    expiration: Option<u64>,
+    ip: Option<&str>,
+) -> AppResult<String> {
+    let base = mediaflow_proxy_url.trim_end_matches('/');
+    let endpoint_path = endpoint
+        .filter(|ep| !ep.is_empty())
+        .map(|ep| format!("/{}", ep.trim_start_matches('/')))
+        .unwrap_or_default();
 
-    if let Some(endpoint) = &req.endpoint {
-        url = format!(
-            "{}/{}",
-            url.trim_end_matches('/'),
-            endpoint.trim_start_matches('/')
-        );
-    }
-
-    // If api_password is provided in the request body, encrypt the data
-    if let Some(api_password) = &req.api_password {
-        let encryption_handler = EncryptionHandler::new(api_password.as_bytes()).map_err(|e| {
-            AppError::Internal(format!("Failed to create encryption handler: {}", e))
-        })?;
+    if let Some(password) = api_password.filter(|p| !p.is_empty()) {
+        let handler = EncryptionHandler::new(password.as_bytes())
+            .map_err(|e| AppError::Internal(format!("Failed to create encryption handler: {}", e)))?;
 
         let proxy_data = ProxyData {
-            destination: req.destination_url.clone(),
+            destination: destination_url.to_string(),
             query_params: Some(
-                serde_json::to_value(&req.query_params).map_err(AppError::SerdeJsonError)?,
+                serde_json::to_value(query_params).map_err(AppError::SerdeJsonError)?,
             ),
             request_headers: Some(
-                serde_json::to_value(&req.request_headers).map_err(AppError::SerdeJsonError)?,
+                serde_json::to_value(request_headers).map_err(AppError::SerdeJsonError)?,
             ),
             response_headers: Some(
-                serde_json::to_value(&req.response_headers).map_err(AppError::SerdeJsonError)?,
+                serde_json::to_value(response_headers).map_err(AppError::SerdeJsonError)?,
             ),
-            exp: req.expiration.map(|e| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs()
-                    + e
+            exp: expiration.map(|e| {
+                SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() + e
             }),
-            ip: req.ip.clone(),
+            ip: ip.map(|s| s.to_string()),
         };
 
-        let token = encryption_handler.encrypt(&proxy_data)?;
-        url = format!("{}?token={}", url, token);
+        let token = handler.encrypt(&proxy_data)?;
+
+        // Python format: {scheme}://{authority}/_token_{token}{endpoint_path}[/{filename}]
+        // Split base URL into scheme+authority and any existing path.
+        let (scheme_authority, existing_path) = split_base_and_path(base);
+        let mut url = format!(
+            "{}/_token_{}{}{}",
+            scheme_authority,
+            token,
+            existing_path,
+            endpoint_path
+        );
+        if let Some(fname) = filename {
+            url = format!("{}/{}", url, urlencoding::encode(fname));
+        }
+        Ok(url)
     } else {
-        // If no api_password in body, encode parameters in URL
-        let mut params = req.query_params.clone();
-        params.insert("d".to_string(), req.destination_url.clone());
-
-        // Add headers if provided with proper prefixes
-        for (key, value) in &req.request_headers {
-            params.insert(format!("h_{}", key), value.clone());
-        }
-        for (key, value) in &req.response_headers {
-            params.insert(format!("r_{}", key), value.clone());
+        // Unencrypted: flat query params matching Python's encode_mediaflow_proxy_url.
+        let mut url = format!("{}{}", base, endpoint_path);
+        if let Some(fname) = filename {
+            url = format!("{}/{}", url, urlencoding::encode(fname));
         }
 
-        let query_string = params
+        let mut params: Vec<(String, String)> =
+            vec![("d".to_string(), destination_url.to_string())];
+
+        for (k, v) in query_params {
+            if !v.is_empty() {
+                params.push((k.clone(), v.clone()));
+            }
+        }
+
+        for (k, v) in request_headers {
+            if v.is_empty() {
+                continue;
+            }
+            // Skip per-request dynamic headers (range, if-range) — baking them into
+            // the URL would override the player's actual seek headers on playback.
+            let k_lower = k.to_lowercase();
+            let bare = k_lower.strip_prefix("h_").unwrap_or(&k_lower);
+            if SUPPORTED_REQUEST_HEADERS.contains(&bare) {
+                continue;
+            }
+            let prefixed = if k.starts_with("h_") { k.clone() } else { format!("h_{}", k) };
+            params.push((prefixed, v.clone()));
+        }
+
+        for (k, v) in response_headers {
+            if v.is_empty() {
+                continue;
+            }
+            let prefixed = if k.starts_with("r_") { k.clone() } else { format!("r_{}", k) };
+            params.push((prefixed, v.clone()));
+        }
+
+        for (k, v) in propagate_response_headers {
+            if v.is_empty() {
+                continue;
+            }
+            let prefixed = if k.starts_with("rp_") { k.clone() } else { format!("rp_{}", k) };
+            params.push((prefixed, v.clone()));
+        }
+
+        if !remove_response_headers.is_empty() {
+            params.push(("x_headers".to_string(), remove_response_headers.join(",")));
+        }
+
+        if let Some(transformer) = stream_transformer {
+            params.push(("transformer".to_string(), transformer.to_string()));
+        }
+
+        let qs = params
             .iter()
-            .map(|(k, v)| format!("{}={}", k, urlencoding::encode(&v.to_string())))
+            .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
             .collect::<Vec<_>>()
             .join("&");
 
-        url = format!("{}?{}", url, query_string);
+        Ok(format!("{}?{}", url, qs))
     }
+}
 
-    Ok(HttpResponse::Ok().json(serde_json::json!({
-        "url": url
-    })))
+/// Split `"https://host/path"` → `("https://host", "/path")`.
+fn split_base_and_path(url: &str) -> (&str, &str) {
+    if let Some(scheme_end) = url.find("://") {
+        let after_scheme = &url[scheme_end + 3..];
+        if let Some(path_pos) = after_scheme.find('/') {
+            let split = scheme_end + 3 + path_pos;
+            return (&url[..split], &url[split..]);
+        }
+    }
+    (url, "")
+}
+
+pub async fn generate_url(req: web::Json<GenerateUrlRequest>) -> AppResult<HttpResponse> {
+    let url = build_proxy_url(
+        &req.mediaflow_proxy_url,
+        req.endpoint.as_deref(),
+        &req.destination_url,
+        &req.query_params,
+        &req.request_headers,
+        &req.response_headers,
+        &req.propagate_response_headers,
+        &req.remove_response_headers,
+        req.stream_transformer.as_deref(),
+        req.filename.as_deref(),
+        req.api_password.as_deref(),
+        req.expiration,
+        req.ip.as_deref(),
+    )?;
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "url": url })))
 }
 
 // Mirrors Python's IP_LOOKUP_SERVICES — tried in order; first success wins.
@@ -281,16 +374,26 @@ pub async fn get_public_ip(stream_manager: web::Data<StreamManager>) -> AppResul
     ))
 }
 
-// ---------------------------------------------------------------------------
-// Deprecated alias — identical logic to generate_url, returns {"encoded_url": ...}
-// ---------------------------------------------------------------------------
+// Deprecated alias — same logic as generate_url but returns {"encoded_url": ...}
 pub async fn generate_encrypted_or_encoded_url(
     req: web::Json<GenerateUrlRequest>,
 ) -> AppResult<HttpResponse> {
-    // Re-use the inner generate_url logic; translate {"url": x} → {"encoded_url": x}
-    let resp = generate_url(req).await?;
-    // The response body is a JSON object with a "url" field — re-wrap it
-    Ok(resp)
+    let url = build_proxy_url(
+        &req.mediaflow_proxy_url,
+        req.endpoint.as_deref(),
+        &req.destination_url,
+        &req.query_params,
+        &req.request_headers,
+        &req.response_headers,
+        &req.propagate_response_headers,
+        &req.remove_response_headers,
+        req.stream_transformer.as_deref(),
+        req.filename.as_deref(),
+        req.api_password.as_deref(),
+        req.expiration,
+        req.ip.as_deref(),
+    )?;
+    Ok(HttpResponse::Ok().json(serde_json::json!({ "encoded_url": url })))
 }
 
 // ---------------------------------------------------------------------------
@@ -302,11 +405,16 @@ pub struct MultiUrlRequestItem {
     pub endpoint: Option<String>,
     pub destination_url: String,
     #[serde(default)]
-    pub query_params: std::collections::HashMap<String, String>,
+    pub query_params: HashMap<String, String>,
     #[serde(default)]
-    pub request_headers: std::collections::HashMap<String, String>,
+    pub request_headers: HashMap<String, String>,
     #[serde(default)]
-    pub response_headers: std::collections::HashMap<String, String>,
+    pub response_headers: HashMap<String, String>,
+    #[serde(default)]
+    pub propagate_response_headers: HashMap<String, String>,
+    #[serde(default)]
+    pub remove_response_headers: Vec<String>,
+    pub stream_transformer: Option<String>,
     pub filename: Option<String>,
 }
 
@@ -315,74 +423,29 @@ pub struct GenerateMultiUrlRequest {
     pub mediaflow_proxy_url: String,
     pub api_password: Option<String>,
     pub expiration: Option<u64>,
+    pub ip: Option<String>,
     pub urls: Vec<MultiUrlRequestItem>,
 }
 
 pub async fn generate_urls(req: web::Json<GenerateMultiUrlRequest>) -> AppResult<HttpResponse> {
-    let encryption_handler = req
-        .api_password
-        .as_deref()
-        .filter(|p| !p.is_empty())
-        .map(|p| EncryptionHandler::new(p.as_bytes()))
-        .transpose()
-        .map_err(|e| AppError::Internal(format!("Encryption init failed: {e}")))?;
-
     let mut encoded: Vec<String> = Vec::with_capacity(req.urls.len());
 
     for item in &req.urls {
-        let base = req.mediaflow_proxy_url.trim_end_matches('/');
-        let mut url = match &item.endpoint {
-            Some(ep) => format!("{}/{}", base, ep.trim_start_matches('/')),
-            None => base.to_string(),
-        };
-
-        // Append filename to path if provided (cosmetic, for player format detection)
-        if let Some(fname) = &item.filename {
-            url = format!("{}/{}", url, fname.trim_start_matches('/'));
-        }
-
-        if let Some(ref enc) = encryption_handler {
-            let proxy_data = ProxyData {
-                destination: item.destination_url.clone(),
-                query_params: Some(
-                    serde_json::to_value(&item.query_params).map_err(AppError::SerdeJsonError)?,
-                ),
-                request_headers: Some(
-                    serde_json::to_value(&item.request_headers)
-                        .map_err(AppError::SerdeJsonError)?,
-                ),
-                response_headers: Some(
-                    serde_json::to_value(&item.response_headers)
-                        .map_err(AppError::SerdeJsonError)?,
-                ),
-                exp: req.expiration.map(|e| {
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs()
-                        + e
-                }),
-                ip: None,
-            };
-            let token = enc.encrypt(&proxy_data)?;
-            url = format!("{}?token={}", url, token);
-        } else {
-            let mut params = item.query_params.clone();
-            params.insert("d".to_string(), item.destination_url.clone());
-            for (k, v) in &item.request_headers {
-                params.insert(format!("h_{k}"), v.clone());
-            }
-            for (k, v) in &item.response_headers {
-                params.insert(format!("r_{k}"), v.clone());
-            }
-            let qs = params
-                .iter()
-                .map(|(k, v)| format!("{}={}", k, urlencoding::encode(v)))
-                .collect::<Vec<_>>()
-                .join("&");
-            url = format!("{}?{}", url, qs);
-        }
-
+        let url = build_proxy_url(
+            &req.mediaflow_proxy_url,
+            item.endpoint.as_deref(),
+            &item.destination_url,
+            &item.query_params,
+            &item.request_headers,
+            &item.response_headers,
+            &item.propagate_response_headers,
+            &item.remove_response_headers,
+            item.stream_transformer.as_deref(),
+            item.filename.as_deref(),
+            req.api_password.as_deref(),
+            req.expiration,
+            req.ip.as_deref(),
+        )?;
         encoded.push(url);
     }
 

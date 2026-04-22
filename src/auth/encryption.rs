@@ -4,6 +4,7 @@ use cbc::{Decryptor, Encryptor};
 use cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::error::AppError;
@@ -19,6 +20,58 @@ pub struct ProxyData {
     pub response_headers: Option<serde_json::Value>,
     pub exp: Option<u64>,
     pub ip: Option<String>,
+}
+
+impl ProxyData {
+    /// Convert a Python-proxy flat dict payload into ProxyData.
+    ///
+    /// Python's `encrypt_data` serialises: `{"d": dest, "h_*": req_headers,
+    /// "r_*": resp_headers, "exp": ts, "ip": "...", ...rest: query_params}`.
+    pub fn from_python_flat_dict(mut map: serde_json::Map<String, serde_json::Value>) -> Self {
+        let destination = map
+            .remove("d")
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default();
+        let exp = map.remove("exp").and_then(|v| v.as_u64());
+        let ip = map
+            .remove("ip")
+            .and_then(|v| v.as_str().map(|s| s.to_string()));
+
+        let mut query_params = serde_json::Map::new();
+        let mut request_headers = serde_json::Map::new();
+        let mut response_headers = serde_json::Map::new();
+
+        for (k, v) in map {
+            if let Some(stripped) = k.strip_prefix("h_") {
+                request_headers.insert(stripped.to_string(), v);
+            } else if let Some(stripped) = k.strip_prefix("r_") {
+                response_headers.insert(stripped.to_string(), v);
+            } else {
+                query_params.insert(k, v);
+            }
+        }
+
+        ProxyData {
+            destination,
+            query_params: if query_params.is_empty() {
+                None
+            } else {
+                Some(Value::Object(query_params))
+            },
+            request_headers: if request_headers.is_empty() {
+                None
+            } else {
+                Some(Value::Object(request_headers))
+            },
+            response_headers: if response_headers.is_empty() {
+                None
+            } else {
+                Some(Value::Object(response_headers))
+            },
+            exp,
+            ip,
+        }
+    }
 }
 
 /// AES-256-CBC encryption handler compatible with the Python mediaflow-proxy.
@@ -79,8 +132,15 @@ impl EncryptionHandler {
                 AppError::Auth("Decryption failed: invalid padding or corrupt token".to_string())
             })?;
 
-        let proxy_data: ProxyData = serde_json::from_slice(&plaintext)
-            .map_err(|e| AppError::Auth(format!("Invalid token data: {}", e)))?;
+        // Try the Rust ProxyData format first; fall back to the Python flat-dict format.
+        let proxy_data: ProxyData = match serde_json::from_slice(&plaintext) {
+            Ok(pd) => pd,
+            Err(_) => {
+                let flat: serde_json::Map<String, Value> = serde_json::from_slice(&plaintext)
+                    .map_err(|e| AppError::Auth(format!("Invalid token data: {}", e)))?;
+                ProxyData::from_python_flat_dict(flat)
+            }
+        };
 
         if let Some(exp) = proxy_data.exp {
             let now = SystemTime::now()

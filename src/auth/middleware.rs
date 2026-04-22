@@ -133,52 +133,74 @@ where
 
     forward_ready!(service);
 
-    fn call(&self, req: ServiceRequest) -> Self::Future {
+    fn call(&self, mut req: ServiceRequest) -> Self::Future {
         let service = self.service.clone();
         let encryption_handler = self.encryption_handler.clone();
         let api_password = self.api_password.clone();
 
         Box::pin(async move {
-            // Check if path is in open endpoints or is a static web UI asset
-            if OPEN_ENDPOINTS.iter().any(|path| req.path() == *path) || is_static_asset(req.path())
-            {
+            // If API password is not set, allow all requests
+            if api_password.is_empty() {
                 return service.call(req).await;
             }
 
-            // If API password is not set, allow all requests
-            if api_password.is_empty() {
+            // Check for Python-style path token: /_token_{encrypted_token}/endpoint
+            let path = req.path().to_owned();
+            if let Some(after_marker) = path.strip_prefix("/_token_") {
+                if let Some(handler) = &encryption_handler {
+                    let (token, remaining_path) = match after_marker.find('/') {
+                        Some(pos) => (&after_marker[..pos], &after_marker[pos..]),
+                        None => (after_marker, "/"),
+                    };
+
+                    let client_ip = req
+                        .connection_info()
+                        .realip_remote_addr()
+                        .map(|s| s.to_string());
+                    let proxy_data = handler
+                        .decrypt(token, client_ip.as_deref())
+                        .map_err(Error::from)?;
+
+                    // Rewrite the URI to strip the /_token_{token} prefix so the
+                    // router sees the real endpoint path.
+                    let qs = req.query_string().to_owned();
+                    let new_pq = if qs.is_empty() {
+                        remaining_path.to_string()
+                    } else {
+                        format!("{}?{}", remaining_path, qs)
+                    };
+                    req.head_mut().uri = new_pq.parse().map_err(|_| {
+                        Error::from(AppError::Internal(
+                            "Failed to rewrite request URI after token extraction".to_string(),
+                        ))
+                    })?;
+
+                    req.extensions_mut().insert(proxy_data);
+                    return service.call(req).await;
+                }
+            }
+
+            // Check if path is in open endpoints or is a static web UI asset
+            if OPEN_ENDPOINTS.iter().any(|p| req.path() == *p) || is_static_asset(req.path()) {
                 return service.call(req).await;
             }
 
             let query_string = req.query_string().to_owned();
             let query_params = AuthMiddleware::extract_query_params(&query_string);
 
-            // Check for encrypted token
+            // Check for query-param token (?token=...)
+            // Successful decryption proves knowledge of api_password — the AES key is
+            // derived from it, so a wrong key yields a padding error or non-JSON garbage.
             if let Some(token) = query_params.get("token").and_then(|v| v.as_str()) {
                 if let Some(handler) = encryption_handler {
-                    // Get client IP if needed for validation
                     let client_ip = req
                         .connection_info()
                         .realip_remote_addr()
                         .map(|s| s.to_string());
-
-                    // Decrypt the token. A successful decryption is itself proof
-                    // of authentication: the AES-256 key is derived from
-                    // `api_password`, so only a caller that knows the password
-                    // can produce a ciphertext that decrypts to valid JSON
-                    // ProxyData (wrong key → Pkcs7 padding error or non-JSON
-                    // garbage). No further api_password check inside the
-                    // decrypted payload is needed, and requiring one breaks
-                    // Python-proxy compatibility: neither the Python
-                    // mediaflow-proxy nor our own `generate_url(s)` handlers
-                    // embed api_password inside the encrypted payload, so the
-                    // old post-decryption check rejected every token those
-                    // code paths produced with a silent 401.
                     let proxy_data = handler
                         .decrypt(token, client_ip.as_deref())
                         .map_err(Error::from)?;
 
-                    // Store proxy data in request extensions
                     req.extensions_mut().insert(proxy_data);
                     return service.call(req).await;
                 }
