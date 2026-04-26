@@ -345,13 +345,10 @@ async fn main() -> std::io::Result<()> {
             );
         }
 
-        // Generic /proxy scope — MUST be registered BEFORE the Xtream block
-        // below.  actix-web evaluates services in registration order, and
-        // Xtream's root-level catch-all /{username}/{password}/{stream_id}[.{ext}]
-        // matches any 3-segment path (e.g. /proxy/stream/foo.mkv →
-        // username=proxy, password=stream, stream_id=foo, ext=mkv), shadowing
-        // /proxy/stream/{filename:.*} and returning an "Invalid XC username
-        // format" error from short_stream_handler.
+        // Generic /proxy scope — registered before the Xtream block as an
+        // extra layer of protection. The Xtream short-stream catch-all also
+        // has an explicit `not_internal_prefix` guard (see below) so it never
+        // fires for /proxy/… paths regardless of registration order.
         {
             use epg::handler::epg_proxy_handler;
             app = app.service(
@@ -375,14 +372,35 @@ async fn main() -> std::io::Result<()> {
         }
 
         // ── Xtream Codes routes (Phase 4) ───────────────────────────────────────
-        // MUST come after all /proxy/* sub-scopes: the short-stream catch-all
-        // /{username}/{password}/{stream_id} matches any 3-segment path at root.
+        // The short-stream catch-all /{username}/{password}/{stream_id} would
+        // ambiguously match /proxy/stream/<b64dest> (username=proxy, password=stream).
+        // Guard all catch-all routes so they never fire when the first path segment
+        // is a known internal scope prefix.
         #[cfg(feature = "xtream")]
         {
+            use actix_web::guard;
             use xtream::handler::{
                 get_playlist_handler, live_stream_handler, movie_stream_handler, panel_api_handler,
                 player_api_handler, series_stream_handler, short_stream_handler, timeshift_handler,
                 xmltv_handler,
+            };
+
+            // Returns true when the path does NOT start with an internal scope prefix.
+            // Applied to the short-stream catch-all only — the more-specific /live/, /movie/,
+            // /series/, /hls/ routes above are already explicit enough to be unambiguous.
+            let not_internal_prefix = |ctx: &guard::GuardContext<'_>| -> bool {
+                let first_seg = ctx
+                    .head()
+                    .uri
+                    .path()
+                    .trim_start_matches('/')
+                    .split('/')
+                    .next()
+                    .unwrap_or("");
+                !matches!(
+                    first_seg,
+                    "proxy" | "extractor" | "playlist" | "speedtest" | "health" | "metrics"
+                )
             };
             app = app
                 .route("/player_api.php", web::get().to(player_api_handler))
@@ -480,22 +498,31 @@ async fn main() -> std::io::Result<()> {
                     "/hlsr/{token}/{username}/{password}/{channel_id}/{start}/{end}/index.m3u8",
                     web::head().to(live_stream_handler),
                 )
-                // Short streams (with and without extension) — must be last (catch-all)
+                // Short streams (with and without extension) — must be last (catch-all).
+                // Guards prevent these patterns from shadowing internal /proxy/… scope paths.
                 .route(
                     "/{username}/{password}/{stream_id}.{ext}",
-                    web::get().to(short_stream_handler),
+                    web::get()
+                        .guard(guard::fn_guard(not_internal_prefix))
+                        .to(short_stream_handler),
                 )
                 .route(
                     "/{username}/{password}/{stream_id}.{ext}",
-                    web::head().to(short_stream_handler),
+                    web::head()
+                        .guard(guard::fn_guard(not_internal_prefix))
+                        .to(short_stream_handler),
                 )
                 .route(
                     "/{username}/{password}/{stream_id}",
-                    web::get().to(short_stream_handler),
+                    web::get()
+                        .guard(guard::fn_guard(not_internal_prefix))
+                        .to(short_stream_handler),
                 )
                 .route(
                     "/{username}/{password}/{stream_id}",
-                    web::head().to(short_stream_handler),
+                    web::head()
+                        .guard(guard::fn_guard(not_internal_prefix))
+                        .to(short_stream_handler),
                 );
         }
 

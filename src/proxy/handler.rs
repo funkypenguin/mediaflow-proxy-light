@@ -49,8 +49,7 @@ async fn handle_proxy_request(
 
     if destination.is_empty() {
         return Err(AppError::BadRequest(
-            "Missing destination URL. Provide `d=<url>` query param or an encrypted token."
-                .into(),
+            "Missing destination URL. Provide `d=<url>` query param or an encrypted token.".into(),
         ));
     }
 

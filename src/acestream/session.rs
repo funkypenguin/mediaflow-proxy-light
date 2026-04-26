@@ -298,7 +298,9 @@ impl AcestreamSessionManager {
                 tracing::info!(
                     "Acestream stopping idle engine for {infohash_owned:.16} after grace period"
                 );
-                manager.send_stop_command(&infohash_owned, command_url).await;
+                manager
+                    .send_stop_command(&infohash_owned, command_url)
+                    .await;
             }
         });
     }
